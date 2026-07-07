@@ -1,0 +1,6 @@
+# Pipeline run logs -- transient run history, not data. Kept locally only.
+logs/
+
+# Python bytecode cache.
+__pycache__/
+*.pyc
