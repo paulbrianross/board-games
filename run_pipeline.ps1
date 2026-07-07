@@ -32,11 +32,24 @@ Log '=== pipeline run start ==='
 
 # --- 1. run the feed(s) ----------------------------------------------------
 Log 'Running bgg-csv download...'
-python (Join-Path $RepoRoot 'feeds\bgg-csv\download_bgg_ranks.py')
-# Use $LASTEXITCODE (the native exit code), NOT $?, which is unreliable for
-# native executables in Windows PowerShell.
-if ($LASTEXITCODE -ne 0) {
-    Log "ERROR: download script exited $LASTEXITCODE -- aborting, nothing pushed."
+$downloadScript = Join-Path $RepoRoot 'feeds\bgg-csv\download_bgg_ranks.py'
+$outTmp = Join-Path $LogDir 'download.tmp'
+# Run via cmd so the script's stdout+stderr merge (in order) into a file.
+# Doing the 2>&1 redirection inside cmd -- not PowerShell -- sidesteps PS 5.1
+# wrapping native stderr as error records. $LASTEXITCODE then carries python's
+# real exit code.
+cmd /c "python `"$downloadScript`" > `"$outTmp`" 2>&1"
+$exit = $LASTEXITCODE
+# Fold the script's own output into our log so unattended failures are
+# self-diagnosing -- a crash's traceback lands here, not just a bare exit code.
+foreach ($line in (Get-Content $outTmp -ErrorAction SilentlyContinue)) {
+    Log "  [download] $line"
+}
+Remove-Item $outTmp -ErrorAction SilentlyContinue
+# Use the captured native exit code, NOT $?, which is unreliable for native
+# executables in Windows PowerShell.
+if ($exit -ne 0) {
+    Log "ERROR: download script exited $exit -- aborting, nothing pushed."
     exit 1
 }
 Log 'Download step OK.'
