@@ -25,6 +25,7 @@ import html
 import io
 import re
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -40,6 +41,15 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 LOGIN_URL = "https://boardgamegeek.com/login/api/v1"
 DUMPS_URL = "https://boardgamegeek.com/data_dumps/bg_ranks"
+
+# Network resilience. TIMEOUT is (connect, read) in seconds: every request must
+# be bounded or a stalled socket read blocks the process forever -- the exact
+# failure that silently killed the 2026-07-09 run mid-download. The big S3
+# download additionally gets a few bounded retries so a transient stall doesn't
+# lose the day.
+TIMEOUT = (10, 60)
+S3_RETRIES = 3
+S3_BACKOFF = 3  # seconds between download attempts
 
 # Output lands in the repo's data/bgg-csv/ folder (one subfolder per feed),
 # resolved relative to THIS file so it works no matter what directory the
@@ -66,14 +76,15 @@ def get_download_link(session):
 
     resp = session.post(
         LOGIN_URL,
-        json={"credentials": {"username": USERNAME, "password": password}})
+        json={"credentials": {"username": USERNAME, "password": password}},
+        timeout=TIMEOUT)
     if resp.status_code not in (200, 202, 204) or "bggusername" not in session.cookies:
         die(f"Login failed: HTTP {resp.status_code}, "
             f"cookies={sorted(session.cookies.keys())}. "
             f"Check the stored BGG password.")
     print(f"Logged in as {USERNAME} (HTTP {resp.status_code}).")
 
-    page = session.get(DUMPS_URL)
+    page = session.get(DUMPS_URL, timeout=TIMEOUT)
     if page.status_code != 200:
         die(f"data_dumps page returned HTTP {page.status_code}.")
 
@@ -98,6 +109,32 @@ def output_filename(link):
     return name
 
 
+def download_zip(session, link):
+    """Fetch the S3 zip with a timeout + bounded retries, returning its bytes.
+
+    The 2026-07-09 run hung here indefinitely: session.get had no timeout and
+    the S3 socket read stalled, so the process blocked until it was killed
+    mid-run. Now each attempt is bounded by TIMEOUT, and a stalled/dropped read
+    (a RequestException) is retried a few times before giving up cleanly -- at
+    which point the wrapper aborts without pushing and the next run recovers.
+    A non-200 from S3 is a definitive answer (e.g. an expired link), not a
+    stall, so it fails immediately rather than retrying.
+    """
+    last_err = None
+    for attempt in range(1, S3_RETRIES + 1):
+        try:
+            resp = session.get(link, timeout=TIMEOUT)
+            if resp.status_code != 200:
+                die(f"S3 download returned HTTP {resp.status_code}.")
+            return resp.content
+        except requests.exceptions.RequestException as err:
+            last_err = err
+            print(f"  download attempt {attempt}/{S3_RETRIES} failed: {err}")
+            if attempt < S3_RETRIES:
+                time.sleep(S3_BACKOFF)
+    die(f"S3 download failed after {S3_RETRIES} attempts: {last_err}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download the BGG bulk ranks dump.")
     parser.add_argument("--force", action="store_true",
@@ -116,23 +153,21 @@ def main():
         return
 
     print(f"Downloading zip -> {out_path.name} ...")
-    zip_resp = session.get(link)
-    if zip_resp.status_code != 200:
-        die(f"S3 download returned HTTP {zip_resp.status_code}.")
-    if zip_resp.content[:2] != b"PK":
+    content = download_zip(session, link)
+    if content[:2] != b"PK":
         die("Downloaded data is not a zip (missing PK header) -- aborting.")
 
     # Validate the archive and report the CSV inside before committing to disk.
-    with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
         csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
         if not csv_names:
             die("Zip contains no .csv -- aborting.")
         info = zf.getinfo(csv_names[0])
         print(f"  contains {csv_names[0]}  "
               f"({info.file_size:,} bytes uncompressed, "
-              f"{len(zip_resp.content):,} bytes zipped)")
+              f"{len(content):,} bytes zipped)")
 
-    out_path.write_bytes(zip_resp.content)
+    out_path.write_bytes(content)
     print(f"Saved {out_path}")
 
 
