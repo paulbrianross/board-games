@@ -97,13 +97,21 @@ function Invoke-Step($label, $scriptRelPath) {
 # git failure is fatal (Finish 'ERROR'): if we can't commit/push we must not
 # pretend success. Called once per commit phase.
 function Commit-Push($message) {
-    $changes = (git status --porcelain | Out-String)
+    # Scope the emptiness check to data/ to match `git add data/` below: if only
+    # code changed (no new data), there's nothing for the pipeline to commit, so
+    # this must read NOOP -- not proceed and then fail on an empty commit.
+    $changes = (git status --porcelain -- data | Out-String)
     if ([string]::IsNullOrWhiteSpace($changes)) {
         Log "Nothing to commit for '$message'."
         return 'NOOP'
     }
     Log ("Changes detected for '$message':`n" + $changes.TrimEnd())
-    git add -A
+    # Stage ONLY data/, never the whole tree: the pipeline's job is to commit the
+    # feeds' output, and every feed writes under data/. `git add -A` here would
+    # sweep up any uncommitted code you happen to be mid-edit on when the daily
+    # task fires, committing + pushing it under a "Data refresh" message. Code is
+    # committed deliberately by hand, never by the pipeline.
+    git add data/
     if ($LASTEXITCODE -ne 0) { Log 'ERROR: git add failed.'; Finish 'ERROR' 1 }
     git commit -m $message
     if ($LASTEXITCODE -ne 0) { Log 'ERROR: git commit failed.'; Finish 'ERROR' 1 }
