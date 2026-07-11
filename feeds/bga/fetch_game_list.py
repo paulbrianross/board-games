@@ -76,6 +76,16 @@ def fetch_game_list():
 
 
 def main():
+    # One BGA snapshot per calendar day: the game list is a live endpoint (no
+    # server date of its own), so unlike the immutable BGG dump a re-fetch just
+    # yields a slightly different file. If today's CSV already exists the unit
+    # has run today -- skip (exit 0), so a re-run/retry is a clean no-op and
+    # ELO's game total stays frozen across the day's retries.
+    csv_path = OUTPUT_DIR / f"bga_games_{DATE_STR}.csv"
+    if csv_path.exists():
+        print(f"Already have today's game list ({csv_path.name}) -- skipping fetch.")
+        return
+
     games = fetch_game_list()
     if not games:
         die("game_list parsed but empty -- aborting.")

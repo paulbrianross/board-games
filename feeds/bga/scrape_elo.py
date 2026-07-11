@@ -172,8 +172,16 @@ def main():
         if done_is_new:
             done_writer.writerow(DONE_FIELDNAMES)
 
+        interactive = sys.stdout.isatty()
         for i, game in enumerate(todo, 1):
-            print(f"[{i}/{len(todo)}] {game['name']:<40}", end="\r", flush=True)
+            # Live per-game progress only when watched in a terminal. Under the
+            # pipeline (output piped to the log) the \r line never newline-flushes
+            # and would bury the log; emit a periodic milestone instead, so a
+            # stalled unattended run still shows how far it got.
+            if interactive:
+                print(f"[{i}/{len(todo)}] {game['name']:<40}", end="\r", flush=True)
+            elif i % 200 == 0:
+                print(f"  ...{i}/{len(todo)} games this pass", flush=True)
             try:
                 players = fetch_top10(game["id"])
             except Exception as e:

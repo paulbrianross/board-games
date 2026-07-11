@@ -42,6 +42,14 @@ def pipe_tag_pairs(value):
 
 
 def main():
+    # Skip if today's CSV already exists -- the unit has run today. Checked
+    # BEFORE the INPUT_JSON guard on purpose: when fetch_game_list.py skipped
+    # (CSV present), it won't have regenerated the JSON, and that's fine -- a
+    # missing JSON here is a no-op, not an error.
+    if OUTPUT_CSV.exists():
+        print(f"Already have today's game list CSV ({OUTPUT_CSV.name}) -- skipping build.")
+        return
+
     if not INPUT_JSON.exists():
         die(f"Input {INPUT_JSON.name} not found -- run fetch_game_list.py first.")
 
