@@ -1,25 +1,38 @@
 """
-scrape_elo.py -- Feed 3 (BGA), step 3: the daily ELO time series.
+scrape_elo.py -- Feed 3b (BGA): the daily ELO time series.
 
-For each game in today's bga_games_<date>.csv (from build_games_csv.py), POSTs
-to BGA's ranking endpoint and records the top-10 players by ELO, writing one row
-per player to bga_elo_<date>.csv. This is the time series that CANNOT be
+For each game in today's bga_games_<date>.csv (from build_games_csv.py), POSTs to
+BGA's ranking endpoint and records the top-10 players by ELO, writing one row per
+player to data/bga/elo/bga_elo_<date>.csv. This is the time series that CANNOT be
 back-filled -- every day not captured is lost -- so it is the reason Feed 3 is
 prioritised.
 
-All rows from one run share a single `scraped_at` UTC timestamp set at the
-start. `--resume` re-reads the file, skips games already complete (exactly 10
-rows) under the latest timestamp, and re-scrapes the rest under that same
-timestamp -- so an interrupted run can be finished without double-counting.
+Design (see elo-wiring-plan.md for the full reasoning):
 
-Run:  python feeds/bga/scrape_elo.py [--resume]
+- The scraper is DUMB: one pass, append-only. It never re-reads/rewrites/cleans a
+  file mid-run. The wrapper drives repeated passes; this script just does one.
+- Completeness is tracked by a separate DONE-LIST file
+  (bga_elo_done_<date>.csv, schema `game_id, run_id, n_rows`), NOT by row counts
+  -- a crash can truncate a game's rows, and some games legitimately have < 10
+  players, so row counts lie. A game's line is written to the done-list only
+  AFTER its rows have landed, so "done" = "in the done-list".
+- Every pass is resume-aware automatically: it scrapes only the games not yet in
+  today's done-list, appends their rows, then appends their done-list line. No
+  --resume flag needed.
+- RUN ID = a per-day attempt counter (max in today's done-list + 1). It is stamped
+  on every results row and every done-list line, so a later read-time dedup can do
+  an exact lookup: the done-list says "game X completed on run 2" -> keep X's
+  run-2 rows, drop any earlier fragment. Dedup is a READ-time job, never done here.
+- Games are scraped most-valuable-first (by lifetime games_played desc), so a
+  partial day still captures the games people care about.
+
+Run:  python feeds/bga/scrape_elo.py
 """
 
 import csv
 import random
 import sys
 import time
-from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -30,20 +43,24 @@ sys.stdout.reconfigure(encoding="utf-8")
 TOP_PLAYERS_URL = "https://boardgamearena.com/gamepanel/gamepanel/getRanking.html"
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "bga"
+ELO_DIR = DATA_DIR / "elo"
 DATE_STR = date.today().strftime("%Y%m%d")
 GAMES_FILE = DATA_DIR / f"bga_games_{DATE_STR}.csv"
-OUTPUT_FILE = DATA_DIR / f"bga_elo_{DATE_STR}.csv"
+OUTPUT_FILE = ELO_DIR / f"bga_elo_{DATE_STR}.csv"
+DONE_FILE = ELO_DIR / f"bga_elo_done_{DATE_STR}.csv"
 
 # (connect, read) seconds + bounded retry: with ~1,300 POSTs, one stalled socket
 # read must not block the whole run (the 2026-07-09 bgg-csv failure mode, more
 # acute here). A game that still fails after RETRIES raises and is counted as an
-# error by the per-game handler in main(), so one bad game never kills the run.
+# error by the per-game handler in main() -- it is simply left out of the
+# done-list, so a later pass retries it.
 TIMEOUT = (10, 30)
 RETRIES = 3
 BACKOFF = 2  # seconds between attempts
 
 FIELDNAMES = [
     "scraped_at",
+    "run_id",
     "game_id",
     "game_name",
     "rank_no",
@@ -56,42 +73,38 @@ FIELDNAMES = [
     "status",
 ]
 
+DONE_FIELDNAMES = ["game_id", "run_id", "n_rows"]
+
 
 def load_games(path):
+    """Games as dicts {id, name, games_played}, sorted most-played-first.
+
+    Sorting by lifetime games_played descending is partial-day insurance: if a run
+    goes partial, the most valuable games are already captured. It has no effect on
+    whether a day completes.
+    """
     with open(path, newline="", encoding="utf-8") as f:
-        return [{"id": r["id"], "name": r["display_name_en"]} for r in csv.DictReader(f)]
+        games = [
+            {
+                "id": r["id"],
+                "name": r["display_name_en"],
+                "games_played": int(r.get("games_played") or 0),
+            }
+            for r in csv.DictReader(f)
+        ]
+    games.sort(key=lambda g: g["games_played"], reverse=True)
+    return games
 
 
-def load_latest_batch(path):
-    """Returns (scraped_at, {game_id: row_count}) for the most recent batch in the file."""
+def load_done(path):
+    """Returns (set of completed game_ids, max run_id) from today's done-list."""
     if not path.exists():
-        return None, {}
+        return set(), 0
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
-    if not rows:
-        return None, {}
-    latest_ts = max(r["scraped_at"] for r in rows)
-    counts = defaultdict(int)
-    for r in rows:
-        if r["scraped_at"] == latest_ts:
-            counts[r["game_id"]] += 1
-    return latest_ts, counts
-
-
-def check_integrity(path):
-    """Warn about any game+run combinations with more than 10 rows."""
-    with open(path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    counts = defaultdict(int)
-    for r in rows:
-        counts[(r["scraped_at"], r["game_id"], r["game_name"])] += 1
-    problems = [(ts, gid, name, n) for (ts, gid, name), n in counts.items() if n > 10]
-    if problems:
-        print(f"\nWARNING: {len(problems)} game(s) have more than 10 rows in a single run:")
-        for ts, gid, name, n in sorted(problems):
-            print(f"  {ts}  {name} (id={gid})  --  {n} rows")
-    else:
-        print("Integrity check passed: no game has more than 10 rows in any run.")
+    done_ids = {r["game_id"] for r in rows}
+    max_run = max((int(r["run_id"]) for r in rows), default=0)
+    return done_ids, max_run
 
 
 def fetch_top10(game_id):
@@ -117,8 +130,6 @@ def fetch_top10(game_id):
 
 
 def main():
-    resume = "--resume" in sys.argv
-
     # ELO only ever scrapes against TODAY's game list (never an old one), so if
     # today's file isn't there, the game-list unit hasn't run today -- stand down
     # cleanly rather than scrape the heavy time series against the wrong data.
@@ -128,68 +139,85 @@ def main():
         print(f"No game list for today ({GAMES_FILE.name}) -- skipping ELO scrape.")
         return
 
+    ELO_DIR.mkdir(parents=True, exist_ok=True)
+
     games = load_games(GAMES_FILE)
-    game_ids = {g["id"] for g in games}
+    total = len(games)
 
-    if resume:
-        scraped_at, batch_counts = load_latest_batch(OUTPUT_FILE)
-        if scraped_at is None:
-            print("No existing data found -- starting fresh.")
-            resume = False
-        else:
-            complete = {gid for gid, n in batch_counts.items() if n == 10}
-            if complete >= game_ids:
-                print("Last run was complete -- nothing to resume. "
-                      "Run without --resume for a fresh scrape.")
-                return
-            skip_ids = complete
-            print(f"Resuming run from {scraped_at} -- skipping {len(skip_ids)} "
-                  f"complete games, re-scraping {len(games) - len(skip_ids)}")
+    done_ids, max_run = load_done(DONE_FILE)
+    run_id = max_run + 1
 
-    if not resume:
-        scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        skip_ids = set()
+    todo = [g for g in games if g["id"] not in done_ids]
+    if not todo:
+        print(f"All {total} games already in today's done-list -- nothing to do.")
+        return
 
-    file_exists = OUTPUT_FILE.exists()
+    print(f"Run {run_id}: {len(done_ids)}/{total} already done, "
+          f"scraping the remaining {len(todo)} (most-played first).")
+
+    scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    out_is_new = not OUTPUT_FILE.exists()
+    done_is_new = not DONE_FILE.exists()
+
+    games_done = 0
     rows_written = 0
     errors = 0
 
-    with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as out:
+    with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as out, \
+            open(DONE_FILE, "a", newline="", encoding="utf-8") as done_out:
         writer = csv.DictWriter(out, fieldnames=FIELDNAMES)
-        if not file_exists:
+        done_writer = csv.writer(done_out)
+        if out_is_new:
             writer.writeheader()
+        if done_is_new:
+            done_writer.writerow(DONE_FIELDNAMES)
 
-        for i, game in enumerate(games, 1):
-            if game["id"] in skip_ids:
-                continue
-
-            print(f"[{i}/{len(games)}] {game['name']:<40}", end="\r", flush=True)
+        for i, game in enumerate(todo, 1):
+            print(f"[{i}/{len(todo)}] {game['name']:<40}", end="\r", flush=True)
             try:
                 players = fetch_top10(game["id"])
-                for player in players:
-                    writer.writerow({
-                        "scraped_at": scraped_at,
-                        "game_id": game["id"],
-                        "game_name": game["name"],
-                        "rank_no": player["rank_no"],
-                        "player_id": player["id"],
-                        "player_name": player["name"],
-                        "country_code": player.get("country", {}).get("code", ""),
-                        "elo": round(float(player["ranking"])),
-                        "nbr_game": player["nbr_game"],
-                        "device": player["device"],
-                        "status": player["status"],
-                    })
-                    rows_written += 1
             except Exception as e:
+                # Not written to the done-list -> a later pass will retry it.
                 print(f"\nERROR on {game['name']} (id={game['id']}): {e}")
                 errors += 1
+                time.sleep(random.uniform(0.2, 0.6))
+                continue
 
+            # Buffer the whole game's rows, then write them in one go, THEN mark it
+            # done -- so the done-list line only ever appears after the rows have
+            # landed. A crash between the two leaves the game un-done (it gets
+            # retried), and the stale rows are cleaned by read-time dedup.
+            rows = [
+                {
+                    "scraped_at": scraped_at,
+                    "run_id": run_id,
+                    "game_id": game["id"],
+                    "game_name": game["name"],
+                    "rank_no": player["rank_no"],
+                    "player_id": player["id"],
+                    "player_name": player["name"],
+                    "country_code": player.get("country", {}).get("code", ""),
+                    "elo": round(float(player["ranking"])),
+                    "nbr_game": player["nbr_game"],
+                    "device": player["device"],
+                    "status": player["status"],
+                }
+                for player in players
+            ]
+            writer.writerows(rows)
+            out.flush()
+            done_writer.writerow([game["id"], run_id, len(rows)])
+            done_out.flush()
+
+            games_done += 1
+            rows_written += len(rows)
             time.sleep(random.uniform(0.2, 0.6))
 
-    print(f"\nDone. Output: {OUTPUT_FILE}")
-    print(f"Rows written this session: {rows_written:,}  |  Errors: {errors}")
-    check_integrity(OUTPUT_FILE)
+    now_done = len(done_ids) + games_done
+    print(f"\nDone with run {run_id}. Output: {OUTPUT_FILE}")
+    print(f"This pass: {games_done} games, {rows_written:,} rows  |  Errors: {errors}")
+    print(f"Done-list now: {now_done}/{total} games "
+          f"({'COMPLETE' if now_done == total else 'partial'}).")
 
 
 if __name__ == "__main__":
