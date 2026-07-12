@@ -51,8 +51,9 @@ function Log($msg) {
 # Scheduler timeout / power loss) rather than finishing on its own.
 # Final status reads "<feeds>/<elo>", e.g. OK/DONE, PARTIAL(bgg-csv)/PARTIAL:
 #   feeds : OK | PARTIAL(<failed feeds>)
-#   elo   : DONE (all games) | PARTIAL (some) | NONE (zero) | SKIPPED (no game
-#           list today)
+#   elo   : DONE (all games) | PARTIAL (some) | NONE (zero) | SKIPPED (due but no
+#           game list today) | NOTDUE (weekly rest day -- already captured this
+#           week, so ELO deliberately not run)
 # exit 1 (so Task Scheduler retries, up to its fixed 2x @15min) whenever a cheap
 # feed failed OR ELO did not fully complete. Because a retry RESUMES (scrapes
 # only the games not yet in the done-list) it is always cheap -- never a second
@@ -129,6 +130,18 @@ function Count-DataLines($path) {
     return $n - 1
 }
 
+# Was day <dateStrD> (yyyyMMdd) a COMPLETE ELO capture? True iff that day's
+# done-list has a line for every game in that day's game list. Both files are
+# committed + dated, so this reads pure history -- the basis for the weekly gate.
+# A day with no game list (count 0) can't be judged complete -> false.
+function Test-EloCompleteForDay($dateStrD) {
+    $games = Join-Path $RepoRoot "data\bga\bga_games_$dateStrD.csv"
+    $done  = Join-Path $RepoRoot "data\bga\elo\bga_elo_done_$dateStrD.csv"
+    $totalD = Count-DataLines $games
+    if ($totalD -le 0) { return $false }
+    return ((Count-DataLines $done) -ge $totalD)
+}
+
 Log '=== pipeline run start ==='
 
 $stamp = Get-Date -Format 'yyyy-MM-dd'
@@ -179,8 +192,26 @@ $gamesFile = Join-Path $RepoRoot "data\bga\bga_games_$dateStr.csv"
 $doneFile  = Join-Path $RepoRoot "data\bga\elo\bga_elo_done_$dateStr.csv"
 $eloStatus = 'SKIPPED'
 
-if (-not (Test-Path $gamesFile)) {
-    Log 'No game list for today -- ELO stands down (SKIPPED).'
+# --- Weekly gate (see elo-wiring-plan.md): scrape ELO at most once a week, on a
+# Sunday, with daily catch-up until a complete capture lands, then rest again.
+# ELO's footprint (~1,300 requests / ~30 min) is polite per-request but too
+# conspicuous to run daily for no gain -- weekly snapshots carry the same signal.
+# Derived purely from the committed done-lists, no separate state: "this week" =
+# most recent Sunday (inclusive) .. today. If ANY day in that window already has
+# a COMPLETE ELO capture, today is a rest day (NOTDUE). Otherwise ELO is due --
+# Sunday's normal run, or a catch-up on Mon/Tue/... after a missed/failed Sunday.
+$today = (Get-Date).Date
+$lastSunday = $today.AddDays(-[int]$today.DayOfWeek)   # DayOfWeek enum: Sunday = 0
+$capturedDay = $null
+for ($d = $lastSunday; $d -le $today; $d = $d.AddDays(1)) {
+    if (Test-EloCompleteForDay ($d.ToString('yyyyMMdd'))) { $capturedDay = $d; break }
+}
+
+if ($null -ne $capturedDay) {
+    Log ('ELO already captured this week ({0}) -- weekly cadence, standing down until next Sunday (NOTDUE).' -f $capturedDay.ToString('yyyy-MM-dd'))
+    $eloStatus = 'NOTDUE'
+} elseif (-not (Test-Path $gamesFile)) {
+    Log 'ELO due this week, but no game list for today -- ELO stands down (SKIPPED).'
 } else {
     $total = Count-DataLines $gamesFile
     Log "ELO: $total games expected today."
@@ -215,9 +246,11 @@ if ($feedFailures.Count -gt 0) {
 } else {
     $feedStatus = 'OK'
 }
-# Exit 1 (-> the task's 2x @15min retry) whenever a cheap feed failed OR ELO did
-# not fully complete. The retry resumes, so it is always cheap; once the task's
-# retries run out we simply keep whatever was captured.
-$retry = ($feedFailures.Count -gt 0) -or ($eloStatus -ne 'DONE')
+# Exit 1 (-> the task's 2x @15min retry) whenever a cheap feed failed OR ELO was
+# DUE but did not fully complete. NOTDUE (a deliberate weekly rest day) is a
+# success like DONE and must NOT trigger a retry -- only PARTIAL/NONE/SKIPPED do.
+# The retry resumes, so it is always cheap; once the task's retries run out we
+# simply keep whatever was captured.
+$retry = ($feedFailures.Count -gt 0) -or (($eloStatus -ne 'DONE') -and ($eloStatus -ne 'NOTDUE'))
 $code = if ($retry) { 1 } else { 0 }
 Finish "$feedStatus/$eloStatus" $code
