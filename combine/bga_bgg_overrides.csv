@@ -1,0 +1,17 @@
+bga_id,bga_name,outcome,bgg_raw_id,bgg_target_id,reason
+74,Checkers,remap,26952,2083,"REMAP -> 2083 (raw is International Checkers, a different game)"
+2117,Naishi,remap,452404,423648,REMAP -> 423648 (BGA links to expansion 'Naishi: Légendes & Voyageurs'; remap to base game Naishi)
+1272,Crime Zoom: A Dirty Objective,remap,294235,356303,"REMAP -> 356303 (raw is the His Last Card scenario, not A Dirty Objective)"
+1853,Amalfi - Renaissance,remap,298130,351594,REMAP -> 351594 (BGA is the Renaissance edition; raw points at base Amalfi)
+2137,Giraffe Raffe,remap,361186,428639,REMAP -> 428639 (raw Exhaust is unrelated)
+1134,The Ruhr: A Story of Coal Trade,remap,130390,226254,"REMAP -> 226254 (BGA page = English 'The Ruhr: A Story of Coal Trade', not the German original)"
+1480,Century: Spice Road,remap,232832,209685,REMAP -> 209685 (BGA display name is 'Century: Spice Road' but raw points at the Golem re-theme 232832; remap to the Spice Road base)
+1144,Through the Ages: A new Story of Civilization,remap,25613,182028,"REMAP -> 182028 (distinct 2nd edition 'A New Story of Civilization'). Ruling from the collision table, merged here. Pairs with base 1011 (keeps 25613)."
+2364,Challengers! Beach Cup,remap,359970,390340,"REMAP -> 390340 (standalone 'Challengers! Beach Cup'). Ruling from the collision table, merged here. Pairs with base 1681 (keeps 359970)."
+1271,Solo Whist,remap,13337,19451,"REMAP -> 19451 (own BGG entry 'Solo Whist'). Ruling from the collision table, merged here. Pairs with 2298 Whist (keeps 13337)."
+1559,Roppyakken,drop,5451,,DROP - no distinct BGG entry (BGG lists Koi-Koi and Hachi-Hachi separately but no Roppyakken); raw 5451 is the generic Hanafuda deck not this game.
+1556,Minhwatu,drop,5451,,DROP - no distinct BGG entry (Korean hwatu game; BGG has Go-Stop and Godori Hwatu but no Minhwatu); raw 5451 is the Japanese Hanafuda deck not this game.
+1128,French Tarot,remap,13337,4505,REMAP -> 4505 Tarot (BGG titles the traditional French tarot card game plainly 'Tarot'; 1048 votes abstracts-ranked). Raw 13337 Whist is a wrong-game mapping.
+1190,Coinche,drop,15722,,DROP - Belote variant (Belote Coinchee); BGG has no faithful entry (15722 Belote is a different game owned by 1069; La Coincoinche 448250 is an unrelated 2024 product). See paired keep row 1069 Belote.
+1305,Liverpool (Cozy Oaks) Rummy,remap,15878,40004,REMAP -> 40004 Contract Rummy (Liverpool Rummy is a form of Contract Rummy; BGG has no Liverpool-specific entry). Raw 15878 is generic Rummy.
+1263,Grosstarock,remap,4505,2780,"REMAP -> 2780 Tarock (BGA 'Grosstarock' is a Tarock game; BGG's traditional 'Tarock' entry 2780 has 232 votes, strategy-ranked 2371, yr 1425, and is unclaimed by any other BGA game). Raw 4505 'Tarot' is the French Tarot entry - wrong game, and it collided with 1128 French Tarot once that was remapped onto 4505. Surfaced by the resolver as its first on-the-fly collision drop, 2026-07-16."
