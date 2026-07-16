@@ -10,7 +10,7 @@ itself is kept local only (gitignored) -- it is large and mostly whitespace.
 The game list carries no server-side date of its own, so we stamp it with the
 local run date.
 
-Run:  python feeds/bga/fetch_game_list.py
+Run:  python processes/bga/fetch_game_list.py
 """
 
 import json
@@ -34,7 +34,7 @@ TIMEOUT = (10, 60)
 
 # Output lands in the repo's data/bga/ folder, resolved relative to THIS file so
 # it works no matter what directory the scheduler runs it from. This script sits
-# at feeds/bga/, so the repo root is two levels up, then /data/bga.
+# at processes/bga/, so the repo root is two levels up, then /data/bga.
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "bga"
 DATE_STR = date.today().strftime("%Y%m%d")
 

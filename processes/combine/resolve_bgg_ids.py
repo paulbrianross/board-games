@@ -6,7 +6,7 @@ game list plus the hand-maintained overrides. See bga-pre-dupe.md (Executive sum
 
 Flow (per game):
   1. start from the BGA game's own bgg_id;
-  2. apply overrides (combine/bga_bgg_overrides.csv): remap swaps the id, drop removes it;
+  2. apply overrides (processes/combine/bga_bgg_overrides.csv): remap swaps the id, drop it;
   3. treat 0 / 54321 / blank as "no BGG id" (junk placeholders -- neither exists in BGG);
   4. enforce uniqueness: if two games still share an id, the most-played game keeps it and
      the rest are dropped on the fly (a breadcrumb for the separate diagnostics pass).
@@ -14,7 +14,7 @@ Flow (per game):
 This never blocks: it always emits a clean unique list, then the API step can fire.
 
 Output (committed, dated):
-  data/bga/bga_bgg_ids_<date>.csv   cols: bga_id, bga_name, bgg_id, status, note
+  data/combine/bga_bgg_ids_<date>.csv   cols: bga_id, bga_name, bgg_id, status, note
     status : kept | remapped | dropped-placeholder | dropped-override | dropped-on-the-fly
     note   : populated ONLY for dropped-on-the-fly (which id was lost, to whom, and why)
 """
@@ -25,9 +25,10 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-BGA_DIR = ROOT / "data" / "bga"
+HERE = Path(__file__).resolve().parent      # processes/combine
+ROOT = HERE.parents[1]                      # repo root
+BGA_DIR = ROOT / "data" / "bga"             # input: the BGA feed's game list
+OUT_DIR = ROOT / "data" / "combine"         # output: this process's own data folder
 OVERRIDES = HERE / "bga_bgg_overrides.csv"
 
 PLACEHOLDERS = {"", "0", "54321"}   # junk sentinels; neither 0 nor 54321 exists in BGG
@@ -117,7 +118,8 @@ def main():
             on_the_fly += 1
 
     # --- write the committed, dated list (one row per BGA game) ---
-    out_path = BGA_DIR / f"bga_bgg_ids_{run_date}.csv"
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = OUT_DIR / f"bga_bgg_ids_{run_date}.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["bga_id", "bga_name", "bgg_id", "status", "note"])

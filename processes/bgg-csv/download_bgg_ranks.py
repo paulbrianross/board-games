@@ -53,7 +53,7 @@ S3_BACKOFF = 3  # seconds between download attempts
 
 # Output lands in the repo's data/bgg-csv/ folder (one subfolder per feed),
 # resolved relative to THIS file so it works no matter what directory the
-# scheduler runs it from. This script sits at feeds/bgg-csv/, so the repo
+# scheduler runs it from. This script sits at processes/bgg-csv/, so the repo
 # root is three levels up.
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "bgg-csv"
 

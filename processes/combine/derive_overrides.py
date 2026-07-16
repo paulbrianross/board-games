@@ -1,7 +1,7 @@
 """Derive the lean machine-read override file from the hand-maintained master.
 
-  reads : combine/bga_bgg_manual_checks.csv   (the human source of truth)
-  writes: combine/bga_bgg_overrides.csv        (the thin file the resolver applies)
+  reads : processes/combine/bga_bgg_manual_checks.csv  (the human source of truth)
+  writes: processes/combine/bga_bgg_overrides.csv      (the thin file the resolver applies)
 
 The override file is just the master rows whose outcome is 'remap' or 'drop'
 (a 'keep' row means the raw id is correct, so there is nothing to override -- the

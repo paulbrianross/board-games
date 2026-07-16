@@ -26,7 +26,7 @@ Design (see elo-wiring-plan.md for the full reasoning):
 - Games are scraped most-valuable-first (by lifetime games_played desc), so a
   partial day still captures the games people care about.
 
-Run:  python feeds/bga/scrape_elo.py
+Run:  python processes/bga/scrape_elo.py
 """
 
 import csv

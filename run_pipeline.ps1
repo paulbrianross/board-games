@@ -17,9 +17,9 @@
 # hang/crash/kill during ELO can never strand feeds 1 & 2 uncommitted. ELO is
 # best-effort: a partial or empty ELO day is acceptable and never blocks or
 # reverts the Phase A commit.
-#   Feed 1  : bgg-csv download    (feeds/bgg-csv/download_bgg_ranks.py)
-#   Feed 3a : BGA game-list unit  (feeds/bga/fetch_game_list.py -> build_games_csv.py)
-#   Feed 3b : BGA ELO scrape      (feeds/bga/scrape_elo.py) -- resume-driven loop
+#   Feed 1  : bgg-csv download    (processes/bgg-csv/download_bgg_ranks.py)
+#   Feed 3a : BGA game-list unit  (processes/bga/fetch_game_list.py -> build_games_csv.py)
+#   Feed 3b : BGA ELO scrape      (processes/bga/scrape_elo.py) -- resume-driven loop
 
 $ErrorActionPreference = 'Stop'
 
@@ -156,15 +156,15 @@ $feedFailures = @()
 # =========================================================================
 
 # --- Feed 1: BGG bulk CSV download -----------------------------------------
-if ((Invoke-Step 'bgg-csv download' 'feeds\bgg-csv\download_bgg_ranks.py') -ne 0) {
+if ((Invoke-Step 'bgg-csv download' 'processes\bgg-csv\download_bgg_ranks.py') -ne 0) {
     $feedFailures += 'bgg-csv'
 }
 
 # --- Feed 3a: BGA game-list unit (fetch -> build) --------------------------
 # Sequential within the unit: only build the CSV if the fetch produced its JSON.
-$fetchCode = Invoke-Step 'bga game-list fetch' 'feeds\bga\fetch_game_list.py'
+$fetchCode = Invoke-Step 'bga game-list fetch' 'processes\bga\fetch_game_list.py'
 if ($fetchCode -eq 0) {
-    if ((Invoke-Step 'bga build-games-csv' 'feeds\bga\build_games_csv.py') -ne 0) {
+    if ((Invoke-Step 'bga build-games-csv' 'processes\bga\build_games_csv.py') -ne 0) {
         $feedFailures += 'bga-game-list'
     }
 } else {
@@ -218,7 +218,7 @@ if ($null -ne $capturedDay) {
     $after = 0
     while ($true) {
         $before = Count-DataLines $doneFile
-        Invoke-Step 'bga elo scrape' 'feeds\bga\scrape_elo.py' | Out-Null
+        Invoke-Step 'bga elo scrape' 'processes\bga\scrape_elo.py' | Out-Null
         $after = Count-DataLines $doneFile
         if ($after -ge $total) { break }
         if ($after -gt $before) { Log "ELO progress: $after/$total -- resuming."; continue }

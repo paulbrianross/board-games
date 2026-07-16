@@ -7,7 +7,7 @@ are joined with '|', tag pairs become 'id:value', and the deeply-nested `media`
 field is dropped (its structure isn't needed downstream). The CSV is the
 committed artifact; the JSON stays local (gitignored).
 
-Run:  python feeds/bga/build_games_csv.py
+Run:  python processes/bga/build_games_csv.py
 """
 
 import csv
