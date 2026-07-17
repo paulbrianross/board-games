@@ -1,8 +1,9 @@
 """bgg-api / fetch_bgg_api -- fetch raw BGG /thing XML for the care-about set.
 
 Walks the care-about list (work/care_about_<date>.csv), fetches each game's full
-/thing?stats=1 XML from BGG in batches of 20 (public endpoint -- no auth, unlike the
-bulk-CSV download), and writes one per-game <bgg_id>.xml into a dated zip. The XML is
+/thing?stats=1 XML from BGG in batches of 20 (authenticated -- BGG's XML API now requires
+a Bearer token; read from keyring, service 'bgg' / user 'api_token'), and writes one
+per-game <bgg_id>.xml into a dated zip. The XML is
 stored VERBATIM -- no parsing or conversion; unzipping gives back the exact API
 response. See bgg-api-plan.md.
 
