@@ -13,8 +13,8 @@ Flow (per game):
 
 This never blocks: it always emits a clean unique list, then the API step can fire.
 
-Output (committed, dated):
-  data/combine/bga_bgg_ids_<date>.csv   cols: bga_id, bga_name, bgg_id, status, note
+Output (transient, dated -- gitignored scratch, reconstructible from committed inputs):
+  work/bga_bgg_ids_<date>.csv   cols: bga_id, bga_name, bgg_id, status, note
     status : kept | remapped | dropped-placeholder | dropped-override | dropped-on-the-fly
     note   : populated ONLY for dropped-on-the-fly (which id was lost, to whom, and why)
 """
@@ -28,7 +28,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 HERE = Path(__file__).resolve().parent      # processes/combine
 ROOT = HERE.parents[1]                      # repo root
 BGA_DIR = ROOT / "data" / "bga"             # input: the BGA feed's game list
-OUT_DIR = ROOT / "data" / "combine"         # output: this process's own data folder
+OUT_DIR = ROOT / "work"                     # output: transient scratch (gitignored); see care-about-set.md
 OVERRIDES = HERE / "bga_bgg_overrides.csv"
 
 PLACEHOLDERS = {"", "0", "54321"}   # junk sentinels; neither 0 nor 54321 exists in BGG

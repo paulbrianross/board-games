@@ -5,6 +5,11 @@ logs/
 __pycache__/
 *.pyc
 
+# Transient pipeline scratch -- reconstructible stepping stones (unzipped bulk CSV,
+# resolver id-list, care-about list). Overwritten each run, never committed.
+# See care-about-set.md ("Storage") for the reconstruction test that puts files here.
+/work/
+
 # BGA raw game-list JSON -- local scaffolding only; the flattened CSV is the
 # committed artifact (the pretty-printed JSON is ~8x larger and mostly whitespace).
 data/bga/*.json
