@@ -27,6 +27,7 @@ import re
 import sys
 import time
 import zipfile
+from datetime import date
 from pathlib import Path
 
 import keyring
@@ -98,15 +99,24 @@ def get_download_link(session):
 
 
 def output_filename(link):
-    """Use BGG's own filename verbatim, e.g. 'boardgames_ranks_2026-07-06.zip'.
+    """Annotate BGG's served filename with OUR download date, e.g.
+    'boardgames_ranks_2026-07-06_downloaded20260718.zip'.
 
-    Taken straight from the S3 object key (the path before the '?' query) so we
-    store exactly what BGG serves -- no renaming, no date reformatting.
+    The served name (taken straight from the S3 object key, the path before the
+    '?' query) is kept verbatim -- BGG's 'boardgames_ranks_2026-07-06' stays
+    intact -- and we append '_downloaded<YYYYMMDD>' (our dash-free run date). Two
+    reasons: (1) the served name is dated by BGG's DUMP date, which lags the run
+    date by a day (the ~00:30 UTC run fetches the previous UTC day's dump), so an
+    explicit download date lets the pipeline's weekly gate key on run-date like
+    every other feed, with no fragile dump-vs-run offset; (2) it records both the
+    data date (BGG's) and our capture date. `latest()` sort is unaffected: the
+    dump-date prefix still dominates, and '.zip' sorts before '_downloaded'.
     """
     name = link.split("?", 1)[0].rsplit("/", 1)[-1]
     if not name.endswith(".zip"):
         die(f"Unexpected download filename '{name}' -- expected a .zip.")
-    return name
+    stem = name[:-len(".zip")]
+    return f"{stem}_downloaded{date.today():%Y%m%d}.zip"
 
 
 def download_zip(session, link):

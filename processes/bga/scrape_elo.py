@@ -1,11 +1,14 @@
 """
 scrape_elo.py -- Feed 3b (BGA): the daily ELO time series.
 
-For each game in today's bga_games_<date>.csv (from build_games_csv.py), POSTs to
-BGA's ranking endpoint and records the top-10 players by ELO, writing one row per
-player to data/bga/elo/bga_elo_<date>.csv. This is the time series that CANNOT be
-back-filled -- every day not captured is lost -- so it is the reason Feed 3 is
-prioritised.
+For each game in the MOST-RECENT bga_games_<sourced>.csv (from build_games_csv.py;
+sourced = that snapshot's date -- never a hardcoded "today"), POSTs to BGA's
+ranking endpoint and records the top-10 players by ELO, writing one row per player
+to data/bga/elo/bga_elo_sourced<sourced>_downloaded<downloaded>.csv. The filename
+records BOTH the game-list snapshot it scraped (sourced) and when this scrape ran
+(downloaded, i.e. today). This is the time series that CANNOT be back-filled --
+every week not captured is lost -- so it is the reason Feed 3 is prioritised. See
+pipeline-wiring-plan.md for the "most-recent" rule.
 
 Design (see elo-wiring-plan.md for the full reasoning):
 
@@ -17,9 +20,9 @@ Design (see elo-wiring-plan.md for the full reasoning):
   players, so row counts lie. A game's line is written to the done-list only
   AFTER its rows have landed, so "done" = "in the done-list".
 - Every pass is resume-aware automatically: it scrapes only the games not yet in
-  today's done-list, appends their rows, then appends their done-list line. No
+  the done-list, appends their rows, then appends their done-list line. No
   --resume flag needed.
-- RUN ID = a per-day attempt counter (max in today's done-list + 1). It is stamped
+- RUN ID = a per-capture attempt counter (max in this done-list + 1). It is stamped
   on every results row and every done-list line, so a later read-time dedup can do
   an exact lookup: the done-list says "game X completed on run 2" -> keep X's
   run-2 rows, drop any earlier fragment. Dedup is a READ-time job, never done here.
@@ -31,6 +34,7 @@ Run:  python processes/bga/scrape_elo.py
 
 import csv
 import random
+import re
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -44,10 +48,6 @@ TOP_PLAYERS_URL = "https://boardgamearena.com/gamepanel/gamepanel/getRanking.htm
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "bga"
 ELO_DIR = DATA_DIR / "elo"
-DATE_STR = date.today().strftime("%Y%m%d")
-GAMES_FILE = DATA_DIR / f"bga_games_{DATE_STR}.csv"
-OUTPUT_FILE = ELO_DIR / f"bga_elo_{DATE_STR}.csv"
-DONE_FILE = ELO_DIR / f"bga_elo_done_{DATE_STR}.csv"
 
 # (connect, read) seconds + bounded retry: with ~1,300 POSTs, one stalled socket
 # read must not block the whole run (the 2026-07-09 bgg-csv failure mode, more
@@ -97,7 +97,7 @@ def load_games(path):
 
 
 def load_done(path):
-    """Returns (set of completed game_ids, max run_id) from today's done-list."""
+    """Returns (set of completed game_ids, max run_id) from this done-list."""
     if not path.exists():
         return set(), 0
     with open(path, newline="", encoding="utf-8") as f:
@@ -129,42 +129,66 @@ def fetch_top10(game_id):
     raise RuntimeError(f"failed after {RETRIES} attempts: {last_err}")
 
 
+def latest_game_list():
+    """The most-recent bga_games_<YYYYMMDD>.csv, or None if there is none.
+
+    ELO scrapes against the newest game list -- never a hardcoded 'today' -- so a
+    catch-up run on a later day still finds the (weekly) list and resumes the same
+    snapshot. See pipeline-wiring-plan.md, the governing "most-recent" rule.
+    """
+    files = sorted(DATA_DIR.glob("bga_games_*.csv"))
+    return files[-1] if files else None
+
+
 def main():
-    # ELO only ever scrapes against TODAY's game list (never an old one), so if
-    # today's file isn't there, the game-list unit hasn't run today -- stand down
-    # cleanly rather than scrape the heavy time series against the wrong data.
-    # This is a deliberate no-op (exit 0), not a failure: reporting the missing
-    # game list is the game-list unit's job, not ELO's.
-    if not GAMES_FILE.exists():
-        print(f"No game list for today ({GAMES_FILE.name}) -- skipping ELO scrape.")
+    # ELO scrapes against the MOST-RECENT game list (never a hardcoded "today" --
+    # a week-old list is ~the same 1,300 ids, and capturing ELO, which can't be
+    # back-filled, matters far more than the list's age). Output is named
+    # sourced<gamelist-date>_downloaded<today>: same-day task retries share the
+    # download date and so resume the same partial done-list; a next-day catch-up
+    # starts a fresh capture (a new download date). A missing game list is a
+    # deliberate no-op (exit 0), not a failure -- reporting it is the game-list
+    # unit's job, not ELO's.
+    games_file = latest_game_list()
+    if games_file is None:
+        print("No BGA game list found -- skipping ELO scrape.")
         return
+    m = re.search(r"bga_games_(\d{8})\.csv$", games_file.name)
+    if m is None:
+        print(f"Cannot parse a date from {games_file.name} -- skipping ELO scrape.")
+        return
+    sourced = m.group(1)                           # game-list snapshot date
+    downloaded = date.today().strftime("%Y%m%d")   # when THIS scrape runs
+    output_file = ELO_DIR / f"bga_elo_sourced{sourced}_downloaded{downloaded}.csv"
+    done_file = ELO_DIR / f"bga_elo_done_sourced{sourced}_downloaded{downloaded}.csv"
+    print(f"ELO: scraping {games_file.name} -> {output_file.name}.")
 
     ELO_DIR.mkdir(parents=True, exist_ok=True)
 
-    games = load_games(GAMES_FILE)
+    games = load_games(games_file)
     total = len(games)
 
-    done_ids, max_run = load_done(DONE_FILE)
+    done_ids, max_run = load_done(done_file)
     run_id = max_run + 1
 
     todo = [g for g in games if g["id"] not in done_ids]
     if not todo:
-        print(f"All {total} games already in today's done-list -- nothing to do.")
+        print(f"All {total} games already in the done-list -- nothing to do.")
         return
 
     print(f"Run {run_id}: {len(done_ids)}/{total} already done, "
           f"scraping the remaining {len(todo)} (most-played first).")
 
     scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    out_is_new = not OUTPUT_FILE.exists()
-    done_is_new = not DONE_FILE.exists()
+    out_is_new = not output_file.exists()
+    done_is_new = not done_file.exists()
 
     games_done = 0
     rows_written = 0
     errors = 0
 
-    with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as out, \
-            open(DONE_FILE, "a", newline="", encoding="utf-8") as done_out:
+    with open(output_file, "a", newline="", encoding="utf-8") as out, \
+            open(done_file, "a", newline="", encoding="utf-8") as done_out:
         writer = csv.DictWriter(out, fieldnames=FIELDNAMES)
         done_writer = csv.writer(done_out)
         if out_is_new:
@@ -222,7 +246,7 @@ def main():
             time.sleep(random.uniform(0.2, 0.6))
 
     now_done = len(done_ids) + games_done
-    print(f"\nDone with run {run_id}. Output: {OUTPUT_FILE}")
+    print(f"\nDone with run {run_id}. Output: {output_file}")
     print(f"This pass: {games_done} games, {rows_written:,} rows  |  Errors: {errors}")
     print(f"Done-list now: {now_done}/{total} games "
           f"({'COMPLETE' if now_done == total else 'partial'}).")
