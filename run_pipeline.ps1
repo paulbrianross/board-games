@@ -16,18 +16,20 @@
 # in-week) rather than waiting a whole week. Gates read committed dated files only
 # (pure history; no mtime, which breaks on fresh clones).
 #
-# FOUR PHASES, each mapping onto a process (processes/<name>/):
-#   Phase A -- cheap feeds : bgg-csv download + BGA game-list (fetch->build), each
-#              weekly-gated, then ONE commit ("Data refresh"). Banked first.
-#   Phase B -- BGA ELO     : weekly-gated; long (~30 min) resume-driven scrape;
-#              SEPARATE commit ("BGA ELO"). Best-effort -- never blocks Phase A.
-#   Phase C -- combine     : resolver -> care-about filter. Runs IFF Phase A
-#              committed new data (its inputs are Phase-A feeds). Transient work/
-#              output -- NO commit.
-#   Phase D -- bgg-api     : weekly-gated fetch of the care-about set; SEPARATE
-#              commit ("BGG API refresh"). Consumes Phase C's care-about list.
-# The two long tails (B, D) run after the cheap feeds are safely committed, so a
-# hang/crash in either can never strand feeds 1 & 2 uncommitted.
+# FOUR PHASES, each mapping onto a process (processes/<name>/). Letters are the
+# process labels; EXECUTION ORDER is A -> C -> D -> B, i.e. ELO runs LAST:
+#   Phase A (runs 1st) -- cheap feeds : bgg-csv download + BGA game-list
+#              (fetch->build), each weekly-gated, then ONE commit ("Data refresh").
+#   Phase C (runs 2nd) -- combine     : resolver -> care-about filter. Runs IFF
+#              Phase A committed new data (its inputs are Phase-A feeds, not ELO).
+#              Transient work/ output -- NO commit.
+#   Phase D (runs 3rd) -- bgg-api     : weekly-gated fetch of the care-about set;
+#              SEPARATE commit ("BGG API refresh"). Consumes Phase C's list.
+#   Phase B (runs 4th, LAST) -- BGA ELO : weekly-gated; long (~30 min) resume-driven
+#              scrape; SEPARATE commit ("BGA ELO"). Best-effort.
+# ELO runs LAST on purpose: it's the longest, most failure-prone tail, so a hang or
+# crash in it can never block the cheap feeds, the combine build, or the API fetch/
+# commit -- all of which are already banked by the time ELO starts.
 
 $ErrorActionPreference = 'Stop'
 
@@ -220,7 +222,7 @@ Log ("Weekly window: {0} (Tue) .. {1} (today)." -f $lastTuesday.ToString('yyyy-M
 $feedFailures = @()
 
 # =========================================================================
-# PHASE A -- cheap feeds (weekly-gated; bank these BEFORE the long tails)
+# PHASE A -- cheap feeds (runs 1st; weekly-gated; bank these BEFORE the long tails)
 # =========================================================================
 
 # --- Feed 1: BGG bulk CSV download -----------------------------------------
@@ -250,7 +252,55 @@ if (Test-CapturedThisWeek $BgaDir 'bga_games_*.csv' 'bga_games_(\d{8})\.csv$' $l
 $phaseAResult = Commit-Push "Data refresh $stamp"
 
 # =========================================================================
-# PHASE B -- BGA ELO (weekly-gated; runs against the MOST-RECENT game list)
+# PHASE C -- combine (runs 2nd; resolver -> care-about). Runs IFF Phase A committed.
+# =========================================================================
+# C's inputs are Phase-A feeds (BGA game list + BGG bulk CSV); ELO is NOT an
+# input. So C rebuilds the (transient, gitignored work/) care-about list exactly
+# when those inputs changed -- i.e. when Phase A pushed -- and no more. Nothing
+# to commit here; the care-about list is reconstructible scratch.
+$combineStatus = 'NOTNEEDED'
+if ($phaseAResult -eq 'PUSHED') {
+    Log 'Phase A committed new data -- running combine (Phase C).'
+    if ((Invoke-Step 'combine resolve-bgg-ids' 'processes\combine\resolve_bgg_ids.py') -eq 0) {
+        if ((Invoke-Step 'combine build-care-about' 'processes\combine\build_care_about.py') -eq 0) {
+            $combineStatus = 'OK'
+        } else {
+            $combineStatus = 'FAILED'
+        }
+    } else {
+        Log 'Skipping build-care-about because the resolver failed.'
+        $combineStatus = 'FAILED'
+    }
+} else {
+    Log 'Phase A committed nothing new -- combine (Phase C) not needed this run.'
+}
+
+# =========================================================================
+# PHASE D -- bgg-api (runs 3rd; weekly-gated fetch of the care-about set; own commit)
+# =========================================================================
+$apiStatus = 'SKIPPED'
+if ($combineStatus -eq 'FAILED') {
+    # Inputs changed but the care-about list couldn't be refreshed -- do NOT fetch
+    # against a stale/absent list. The FAILED combine already trips a retry.
+    Log 'Phase D (bgg-api) skipped -- combine failed, care-about list not refreshed.'
+} elseif (Test-CapturedThisWeek $ApiDir 'bgg_api_*.zip' 'bgg_api_(\d{8})\.zip$' $lastTuesday) {
+    Log 'Feed D (bgg-api) already captured this week -- standing down (NOTDUE).'
+    $apiStatus = 'NOTDUE'
+} else {
+    # The fetcher reads the most-recent care-about list itself; if none exists it
+    # exits non-zero -> FAILED -> retry.
+    if ((Invoke-Step 'bgg-api fetch' 'processes\bgg-api\fetch_bgg_api.py') -eq 0) {
+        $apiStatus = 'DONE'
+        Commit-Push "BGG API refresh $stamp" | Out-Null
+    } else {
+        $apiStatus = 'FAILED'
+    }
+}
+
+# =========================================================================
+# PHASE B -- BGA ELO (runs 4th / LAST: the ~30-min tail, so a stall or crash
+# here can never block the combine build or the API fetch/commit above).
+# Weekly-gated; runs against the MOST-RECENT game list.
 # =========================================================================
 $eloStatus = 'SKIPPED'
 
@@ -303,52 +353,6 @@ if (Test-EloCapturedThisWeek $lastTuesday) {
         }
         # Phase B commit: whatever ELO captured (complete or partial).
         Commit-Push "BGA ELO $stamp" | Out-Null
-    }
-}
-
-# =========================================================================
-# PHASE C -- combine (resolver -> care-about). Runs IFF Phase A committed.
-# =========================================================================
-# C's inputs are Phase-A feeds (BGA game list + BGG bulk CSV); ELO is NOT an
-# input. So C rebuilds the (transient, gitignored work/) care-about list exactly
-# when those inputs changed -- i.e. when Phase A pushed -- and no more. Nothing
-# to commit here; the care-about list is reconstructible scratch.
-$combineStatus = 'NOTNEEDED'
-if ($phaseAResult -eq 'PUSHED') {
-    Log 'Phase A committed new data -- running combine (Phase C).'
-    if ((Invoke-Step 'combine resolve-bgg-ids' 'processes\combine\resolve_bgg_ids.py') -eq 0) {
-        if ((Invoke-Step 'combine build-care-about' 'processes\combine\build_care_about.py') -eq 0) {
-            $combineStatus = 'OK'
-        } else {
-            $combineStatus = 'FAILED'
-        }
-    } else {
-        Log 'Skipping build-care-about because the resolver failed.'
-        $combineStatus = 'FAILED'
-    }
-} else {
-    Log 'Phase A committed nothing new -- combine (Phase C) not needed this run.'
-}
-
-# =========================================================================
-# PHASE D -- bgg-api (weekly-gated fetch of the care-about set; own commit)
-# =========================================================================
-$apiStatus = 'SKIPPED'
-if ($combineStatus -eq 'FAILED') {
-    # Inputs changed but the care-about list couldn't be refreshed -- do NOT fetch
-    # against a stale/absent list. The FAILED combine already trips a retry.
-    Log 'Phase D (bgg-api) skipped -- combine failed, care-about list not refreshed.'
-} elseif (Test-CapturedThisWeek $ApiDir 'bgg_api_*.zip' 'bgg_api_(\d{8})\.zip$' $lastTuesday) {
-    Log 'Feed D (bgg-api) already captured this week -- standing down (NOTDUE).'
-    $apiStatus = 'NOTDUE'
-} else {
-    # The fetcher reads the most-recent care-about list itself; if none exists it
-    # exits non-zero -> FAILED -> retry.
-    if ((Invoke-Step 'bgg-api fetch' 'processes\bgg-api\fetch_bgg_api.py') -eq 0) {
-        $apiStatus = 'DONE'
-        Commit-Push "BGG API refresh $stamp" | Out-Null
-    } else {
-        $apiStatus = 'FAILED'
     }
 }
 
