@@ -13,10 +13,14 @@ bulk CSV, or a bulk row with no geek rating, has no rating -> dropped.
 
   geek  = bulk CSV bayesaverage    votes = usersrated    lifetime plays = BGA games_played
 
+  BGG side also excludes anything listed in bgg_drops.csv (hand-maintained BGG-id drops --
+  e.g. redundant editions of a game already on BGA; see that file's drop_bgg_type).
+
 Inputs (latest of each):
   work/bga_bgg_ids_<date>.csv      the resolver's unique BGG-id list (transient)
   data/bgg-csv/*.zip               BGG bulk CSV (member boardgames_ranks.csv), zipped
   data/bga/bga_games_<date>.csv    BGA game list (for games_played)
+  processes/combine/bgg_drops.csv  hand-maintained BGG-id drop list (committed)
 
 Output (transient, dated -- gitignored scratch, reconstructible from the inputs):
   work/care_about_<date>.csv
@@ -39,6 +43,7 @@ ROOT = HERE.parents[1]                       # repo root
 WORK_DIR = ROOT / "work"                      # resolver output lives here + our output
 BGA_DIR = ROOT / "data" / "bga"               # BGA game list (for games_played)
 BGG_DIR = ROOT / "data" / "bgg-csv"           # BGG bulk CSV zips
+DROPS_FILE = HERE / "bgg_drops.csv"           # hand-maintained BGG-id exclusions (committed)
 
 BGA_BAR = 5.95        # BGA-side geek bar (rounds to 6.0)
 BGG_BAR = 6.95        # BGG-side geek bar (rounds to 7.0)
@@ -71,6 +76,12 @@ def latest(paths, what):
     return files[-1]
 
 
+def load_drops(path):
+    """bgg_ids to exclude from care-about (hand-maintained; see bgg_drops.csv)."""
+    with open(path, encoding="utf-8") as f:
+        return {r["drop_bgg_id"].strip() for r in csv.DictReader(f)}
+
+
 def load_bulk(zip_path):
     """bgg_id -> bulk-CSV row dict, read straight from the zip (no disk unpack)."""
     with zipfile.ZipFile(zip_path) as z:
@@ -100,7 +111,9 @@ def main():
     with open(bga_file, encoding="utf-8") as f:
         plays_by_bga = {r["id"]: to_int(r.get("games_played")) for r in csv.DictReader(f)}
     bulk = load_bulk(zip_file)
+    drops = load_drops(DROPS_FILE)
     print(f"[care-about] bulk games : {len(bulk):,}")
+    print(f"[care-about] bgg drops  : {len(drops)}")
 
     rows = []            # output rows (dicts)
     bga_claimed = set()  # bgg_ids taken by the BGA side (excluded from the BGG side)
@@ -149,13 +162,16 @@ def main():
         })
 
     # --- BGG side: good games not already on BGA ---
-    n_bgg = 0
+    n_bgg = n_dropped = 0
     for bgg_id, b in bulk.items():
         if bgg_id in bga_claimed:
             continue
         if b["is_expansion"] == "1":
             continue
         if to_float(b["bayesaverage"]) < BGG_BAR:
+            continue
+        if bgg_id in drops:              # would qualify -> hand-dropped (bgg_drops.csv)
+            n_dropped += 1
             continue
         n_bgg += 1
         rows.append({
@@ -180,6 +196,7 @@ def main():
     print(f"[care-about] BGA side       : {n_bga:>5}  "
           f"(geek {n_bga_geek}, plays {n_bga_plays}, both {n_bga_both})")
     print(f"[care-about] BGG side net-new: {n_bgg:>5}")
+    print(f"[care-about] BGG side dropped : {n_dropped:>5}  (bgg_drops.csv)")
     print(f"[care-about] --------------------------------")
     print(f"[care-about] care-about total: {len(rows):>5}")
     print(f"[care-about] (BGA ids not in BGG / no rating: {n_no_bulk}; "
