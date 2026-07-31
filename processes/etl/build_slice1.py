@@ -12,6 +12,7 @@ Two tables:
 Inputs (latest of each, under work/ -- transient, re-extract if gone):
   work/bgg_api_<date>/<bgg_id>.xml   one /thing?stats=1 capture per game
   work/bga_bgg_ids_<date>.csv        resolver output -> the BGA-sourced id set
+  work/care_about_<date>.csv         the served population -> output is filtered to it
 
 Output (eyeball artifacts under gitignored work/, committed dataset is a later concern):
   work/etl-slice1/games.csv
@@ -97,6 +98,23 @@ def load_on_bga(resolver_csv):
                 bid = to_int(row.get("bgg_id"))
                 if bid is not None:
                     ids.add(bid)
+    return ids
+
+
+def load_care_about(care_csv):
+    """The care-about bgg_id set -- the authoritative served population.
+
+    build_slice1's output is this set, NOT "whatever XML sits on disk". The XML
+    capture can lag the care-about list: a drop (bgg_drops.csv) applied after the
+    last weekly fetch leaves stale XML for games no longer wanted, until the next
+    fetch re-syncs. Filtering here sheds those; it can only remove, never invent.
+    """
+    ids = set()
+    with care_csv.open(encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            bid = to_int(row.get("bgg_id"))
+            if bid is not None:
+                ids.add(bid)
     return ids
 
 
@@ -224,14 +242,22 @@ def main():
     if resolver is None:
         die(f"no bga_bgg_ids_<date>.csv under {WORK_DIR}")
 
+    care_csv = latest(list(WORK_DIR.glob("care_about_*.csv")))
+    if care_csv is None:
+        die(f"no care_about_<date>.csv under {WORK_DIR} (run build_care_about first)")
+
     on_bga_ids = load_on_bga(resolver)
+    care_ids = load_care_about(care_csv)
     print(f"[slice1] XML capture : {xml_dir.name}")
     print(f"[slice1] resolver    : {resolver.name}  ({len(on_bga_ids)} BGA ids)")
+    print(f"[slice1] care-about  : {care_csv.name}  ({len(care_ids)} games)")
 
     games, players = [], []
     for xml_path in sorted(xml_dir.glob("*.xml")):
         bid = to_int(xml_path.stem)
         if id_filter is not None and bid not in id_filter:
+            continue
+        if bid not in care_ids:          # output = current care-about population
             continue
         game, prows = parse_game(xml_path, on_bga_ids)
         if game is None:
