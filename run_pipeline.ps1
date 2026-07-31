@@ -8,24 +8,29 @@
 #
 # GOVERNING RULE (see pipeline-wiring-plan.md): every consumer reads the
 # MOST-RECENT file of the kind it needs -- never a hardcoded "today's" file. The
-# only place a date survives is the weekly gate, expressed as "take the newest
-# file of this kind, is ITS date within this week's window?".
+# only place a date survives is the capture gate, expressed as "take the newest
+# file of this kind, is ITS date inside the current capture window?".
 #
-# WEEKLY-TUESDAY CADENCE: each feed captures at most once a week, gated on a
-# last-Tuesday(inclusive)->today window. A miss is caught up on Wed/Thu/Fri (still
-# in-week) rather than waiting a whole week. Gates read committed dated files only
-# (pure history; no mtime, which breaks on fresh clones).
+# CAPTURE CADENCE: weekly (Tuesday) + monthly (1st of the month). Each feed
+# captures at most once per WINDOW, where the window runs from the most recent
+# capture boundary -- of EITHER rhythm -- up to today. Both boundaries are defined
+# as "the most recent one at or before today", so the window start is simply the
+# later of the two; no day-of-week test happens anywhere. Consequences: the 1st
+# adds a capture unless it IS that week's Tuesday (then they coincide and there is
+# just one), and a missed boundary is caught up on the following days rather than
+# lost -- the window stays open until the next boundary. Gates read committed
+# dated files only (pure history; no mtime, which breaks on fresh clones).
 #
 # FOUR PHASES, each mapping onto a process (processes/<name>/). Letters are the
 # process labels; EXECUTION ORDER is A -> C -> D -> B, i.e. ELO runs LAST:
 #   Phase A (runs 1st) -- cheap feeds : bgg-csv download + BGA game-list
-#              (fetch->build), each weekly-gated, then ONE commit ("Data refresh").
+#              (fetch->build), each window-gated, then ONE commit ("Data refresh").
 #   Phase C (runs 2nd) -- combine     : resolver -> care-about filter. Runs IFF
 #              Phase A committed new data (its inputs are Phase-A feeds, not ELO).
 #              Transient work/ output -- NO commit.
-#   Phase D (runs 3rd) -- bgg-api     : weekly-gated fetch of the care-about set;
+#   Phase D (runs 3rd) -- bgg-api     : window-gated fetch of the care-about set;
 #              SEPARATE commit ("BGG API refresh"). Consumes Phase C's list.
-#   Phase B (runs 4th, LAST) -- BGA ELO : weekly-gated; long (~30 min) resume-driven
+#   Phase B (runs 4th, LAST) -- BGA ELO : window-gated; long (~30 min) resume-driven
 #              scrape; SEPARATE commit ("BGA ELO"). Best-effort.
 # ELO runs LAST on purpose: it's the longest, most failure-prone tail, so a hang or
 # crash in it can never block the cheap feeds, the combine build, or the API fetch/
@@ -67,9 +72,9 @@ function Log($msg) {
 # Final status reads "<feeds>/<elo>/<combine>/<api>", e.g. OK/DONE/OK/DONE:
 #   feeds   : OK | PARTIAL(<failed feeds>)
 #   elo     : DONE (complete) | PARTIAL | NONE (zero) | SKIPPED (due, no game
-#             list) | NOTDUE (already captured this week)
+#             list) | NOTDUE (already captured this window)
 #   combine : OK | FAILED | NOTNEEDED (Phase A committed nothing new)
-#   api     : DONE | FAILED | NOTDUE (captured this week) | SKIPPED (combine failed)
+#   api     : DONE | FAILED | NOTDUE (captured this window) | SKIPPED (combine failed)
 # exit 1 (so Task Scheduler retries, up to its fixed 2x @15min) whenever a feed
 # failed, ELO was due but did not complete, combine failed, or the API fetch
 # failed. Retries RESUME/are gated, so they are always cheap.
@@ -163,11 +168,12 @@ function Get-LatestGameList {
         Sort-Object Name | Select-Object -Last 1
 }
 
-# The per-feed weekly gate: "take the newest file matching $glob in $dir, is ITS
+# The per-feed capture gate: "take the newest file matching $glob in $dir, is ITS
 # date (captured by $dateRegex group 1, yyyyMMdd) on or after $windowStart?".
-# True = already captured this week -> the feed stands down. Reads committed
+# True = already captured this window -> the feed stands down. Cadence-agnostic:
+# it only compares against whatever window start it is handed. Reads committed
 # dated files only -- no mtime.
-function Test-CapturedThisWeek($dir, $glob, $dateRegex, $windowStart) {
+function Test-CapturedInWindow($dir, $glob, $dateRegex, $windowStart) {
     $newest = Get-ChildItem -Path $dir -Filter $glob -ErrorAction SilentlyContinue |
         Sort-Object Name | Select-Object -Last 1
     if ($null -eq $newest) { return $false }
@@ -186,14 +192,15 @@ function Test-EloDoneComplete($donePath, $sourced) {
     return ((Count-DataLines $donePath) -ge $totalD)
 }
 
-# The ELO weekly gate: has some ELO capture DOWNLOADED this week already completed?
-# Scans committed done-lists (named bga_elo_done_sourced<S>_downloaded<D>.csv),
-# keys on the DOWNLOADED date being in the window, and uses each file's SOURCED
-# date to find the game list for the completeness count. Keying on downloaded (not
-# sourced) is the point: a this-week capture scraped against a slightly older game
-# list still counts -- the list is ~1,300 near-identical ids week to week, so its
-# age is immaterial; the ELO reading is what we're capturing.
-function Test-EloCapturedThisWeek($windowStart) {
+# The ELO capture gate: has some ELO capture DOWNLOADED inside this window already
+# completed? Scans committed done-lists (named
+# bga_elo_done_sourced<S>_downloaded<D>.csv), keys on the DOWNLOADED date being in
+# the window, and uses each file's SOURCED date to find the game list for the
+# completeness count. Keying on downloaded (not sourced) is the point: an in-window
+# capture scraped against a slightly older game list still counts -- the list is
+# ~1,300 near-identical ids week to week, so its age is immaterial; the ELO reading
+# is what we're capturing.
+function Test-EloCapturedInWindow($windowStart) {
     $doneFiles = Get-ChildItem -Path $EloDir -Filter 'bga_elo_done_sourced*_downloaded*.csv' -ErrorAction SilentlyContinue
     foreach ($f in $doneFiles) {
         if ($f.Name -match 'sourced(\d{8})_downloaded(\d{8})\.csv$') {
@@ -211,31 +218,54 @@ Log '=== pipeline run start ==='
 
 $stamp = Get-Date -Format 'yyyy-MM-dd'
 
-# This week's window: last Tuesday (inclusive) .. today. DayOfWeek enum: Sun=0..
-# Sat=6, Tuesday=2. The modulo gives days-since-most-recent-Tuesday (0 on Tue).
-$today = (Get-Date).Date
-$lastTuesday = $today.AddDays(-(((([int]$today.DayOfWeek) - 2 + 7)) % 7))
-Log ("Weekly window: {0} (Tue) .. {1} (today)." -f $lastTuesday.ToString('yyyy-MM-dd'), $today.ToString('yyyy-MM-dd'))
+# The capture window: most recent capture boundary (inclusive) .. today. Two
+# rhythms produce boundaries -- weekly (the most recent Tuesday) and monthly (the
+# 1st of the CURRENT month) -- and both are by construction at or before today, so
+# the window start is just the later of the two. Current month is the only workable
+# choice: next month's 1st would put the start in the future (every feed would fire
+# every day), and last month's 1st is always superseded by $lastTuesday (the
+# monthly rhythm would silently never fire).
+# DayOfWeek enum: Sun=0..Sat=6, Tuesday=2; the modulo gives days-since-most-recent-
+# Tuesday (0 on Tue).
+$today        = (Get-Date).Date
+$lastTuesday  = $today.AddDays(-(((([int]$today.DayOfWeek) - 2 + 7)) % 7))
+$firstOfMonth = $today.AddDays(1 - $today.Day)
+
+# $boundary names which rhythm opened the window, purely so the log explains WHY a
+# capture fired -- an extra capture on the 1st is otherwise unexplained after the
+# fact. The equality case is the month starting on a Tuesday: one window, one
+# capture, both rhythms satisfied.
+if ($firstOfMonth -eq $lastTuesday) {
+    $windowStart = $lastTuesday
+    $boundary    = 'weekly Tuesday + month start'
+} elseif ($firstOfMonth -gt $lastTuesday) {
+    $windowStart = $firstOfMonth
+    $boundary    = 'month start'
+} else {
+    $windowStart = $lastTuesday
+    $boundary    = 'weekly Tuesday'
+}
+Log ("Capture window: {0} ({1}) .. {2} (today)." -f $windowStart.ToString('yyyy-MM-dd'), $boundary, $today.ToString('yyyy-MM-dd'))
 
 # Track which cheap feeds failed so we can still commit the ones that succeeded,
 # then report a PARTIAL status (exit 1 -> the task retries the failed feeds).
 $feedFailures = @()
 
 # =========================================================================
-# PHASE A -- cheap feeds (runs 1st; weekly-gated; bank these BEFORE the long tails)
+# PHASE A -- cheap feeds (runs 1st; window-gated; bank these BEFORE the long tails)
 # =========================================================================
 
 # --- Feed 1: BGG bulk CSV download -----------------------------------------
-if (Test-CapturedThisWeek $BggCsvDir 'boardgames_ranks_*_downloaded*.zip' '_downloaded(\d{8})\.zip$' $lastTuesday) {
-    Log 'Feed 1 (bgg-csv) already captured this week -- skipping (weekly cadence).'
+if (Test-CapturedInWindow $BggCsvDir 'boardgames_ranks_*_downloaded*.zip' '_downloaded(\d{8})\.zip$' $windowStart) {
+    Log 'Feed 1 (bgg-csv) already captured this window -- skipping.'
 } elseif ((Invoke-Step 'bgg-csv download' 'processes\bgg-csv\download_bgg_ranks.py') -ne 0) {
     $feedFailures += 'bgg-csv'
 }
 
 # --- Feed 3a: BGA game-list unit (fetch -> build) --------------------------
 # Sequential within the unit: only build the CSV if the fetch produced its JSON.
-if (Test-CapturedThisWeek $BgaDir 'bga_games_*.csv' 'bga_games_(\d{8})\.csv$' $lastTuesday) {
-    Log 'Feed 3a (BGA game list) already captured this week -- skipping (weekly cadence).'
+if (Test-CapturedInWindow $BgaDir 'bga_games_*.csv' 'bga_games_(\d{8})\.csv$' $windowStart) {
+    Log 'Feed 3a (BGA game list) already captured this window -- skipping.'
 } else {
     $fetchCode = Invoke-Step 'bga game-list fetch' 'processes\bga\fetch_game_list.py'
     if ($fetchCode -eq 0) {
@@ -276,15 +306,15 @@ if ($phaseAResult -eq 'PUSHED') {
 }
 
 # =========================================================================
-# PHASE D -- bgg-api (runs 3rd; weekly-gated fetch of the care-about set; own commit)
+# PHASE D -- bgg-api (runs 3rd; window-gated fetch of the care-about set; own commit)
 # =========================================================================
 $apiStatus = 'SKIPPED'
 if ($combineStatus -eq 'FAILED') {
     # Inputs changed but the care-about list couldn't be refreshed -- do NOT fetch
     # against a stale/absent list. The FAILED combine already trips a retry.
     Log 'Phase D (bgg-api) skipped -- combine failed, care-about list not refreshed.'
-} elseif (Test-CapturedThisWeek $ApiDir 'bgg_api_*.zip' 'bgg_api_(\d{8})\.zip$' $lastTuesday) {
-    Log 'Feed D (bgg-api) already captured this week -- standing down (NOTDUE).'
+} elseif (Test-CapturedInWindow $ApiDir 'bgg_api_*.zip' 'bgg_api_(\d{8})\.zip$' $windowStart) {
+    Log 'Feed D (bgg-api) already captured this window -- standing down (NOTDUE).'
     $apiStatus = 'NOTDUE'
 } else {
     # The fetcher reads the most-recent care-about list itself; if none exists it
@@ -300,20 +330,20 @@ if ($combineStatus -eq 'FAILED') {
 # =========================================================================
 # PHASE B -- BGA ELO (runs 4th / LAST: the ~30-min tail, so a stall or crash
 # here can never block the combine build or the API fetch/commit above).
-# Weekly-gated; runs against the MOST-RECENT game list.
+# Window-gated; runs against the MOST-RECENT game list.
 # =========================================================================
 $eloStatus = 'SKIPPED'
 
-# Weekly gate: if some ELO capture DOWNLOADED this week already completed, today is
-# a rest day (NOTDUE). Otherwise ELO is due -- Tuesday's normal run, or a Wed..Fri
-# catch-up after a missed/failed Tuesday.
-if (Test-EloCapturedThisWeek $lastTuesday) {
-    Log 'ELO already captured this week -- standing down until next Tuesday (NOTDUE).'
+# Capture gate: if some ELO capture DOWNLOADED inside this window already completed,
+# today is a rest day (NOTDUE). Otherwise ELO is due -- the normal run on a capture
+# boundary, or a catch-up on a later day after a missed/failed one.
+if (Test-EloCapturedInWindow $windowStart) {
+    Log 'ELO already captured this window -- standing down until the next boundary (NOTDUE).'
     $eloStatus = 'NOTDUE'
 } else {
     $gamesInfo = Get-LatestGameList
     if ($null -eq $gamesInfo) {
-        Log 'ELO due this week, but no game list found at all -- ELO stands down (SKIPPED).'
+        Log 'ELO due this window, but no game list found at all -- ELO stands down (SKIPPED).'
     } else {
         # Name the done-list to match the scraper exactly:
         # bga_elo_done_sourced<gamelist-date>_downloaded<today>.csv. ${..} braces
