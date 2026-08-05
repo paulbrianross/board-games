@@ -6,7 +6,17 @@ out. Two sides, deliberately different bars (see care-about-set.md for the full 
   BGA side  -- games playable on BGA (the resolver gave them a BGG id):
               keep if  is_expansion == 0  AND  (geek >= 5.95  OR  lifetime plays >= 100k)
   BGG side  -- good games NOT on BGA, pulled in as similarity-browse neighbours:
-              keep if  is_expansion == 0  AND  geek >= 6.95,  minus anything already on BGA
+              keep if  is_expansion == 0  AND  rank > 0  AND  geek >= 6.95,
+              minus anything already on BGA
+
+Why rank > 0 on the BGG side: rank 0 in the bulk CSV is BGG's "Not Ranked" (the API says
+so in words). BGG still publishes a bayesaverage for those entries, it just keeps them off
+the ranking page -- and they are overwhelmingly duplicate/deluxe editions of a game we
+already carry, rated by the people who bought the deluxe edition (Castles of Burgundy:
+Special Edition, raw 9.14 vs the base game's 8.16). Unfiltered they float to the top of a
+rating sort. Deliberately BGA-side-only-exempt: a BGA game whose id is Not Ranked stays in
+(on_bga wins, same posture as bgg_bga_flag in dataset-model.md) -- which is free here,
+since the BGA side never tests rank and bga_claimed is skipped before this gate.
 
 Hard constraint: every kept game must have a BGG rating. A resolver id absent from the
 bulk CSV, or a bulk row with no geek rating, has no rating -> dropped.
@@ -162,13 +172,16 @@ def main():
         })
 
     # --- BGG side: good games not already on BGA ---
-    n_bgg = n_dropped = 0
+    n_bgg = n_dropped = n_notranked = 0
     for bgg_id, b in bulk.items():
-        if bgg_id in bga_claimed:
+        if bgg_id in bga_claimed:        # on BGA -> already kept, never rank-tested
             continue
         if b["is_expansion"] == "1":
             continue
         if to_float(b["bayesaverage"]) < BGG_BAR:
+            continue
+        if to_int(b["rank"]) <= 0:       # BGG "Not Ranked" -- dup/deluxe editions (see docstring)
+            n_notranked += 1
             continue
         if bgg_id in drops:              # would qualify -> hand-dropped (bgg_drops.csv)
             n_dropped += 1
@@ -197,6 +210,7 @@ def main():
           f"(geek {n_bga_geek}, plays {n_bga_plays}, both {n_bga_both})")
     print(f"[care-about] BGG side net-new: {n_bgg:>5}")
     print(f"[care-about] BGG side dropped : {n_dropped:>5}  (bgg_drops.csv)")
+    print(f"[care-about] BGG side unranked: {n_notranked:>5}  (BGG 'Not Ranked')")
     print(f"[care-about] --------------------------------")
     print(f"[care-about] care-about total: {len(rows):>5}")
     print(f"[care-about] (BGA ids not in BGG / no rating: {n_no_bulk}; "
