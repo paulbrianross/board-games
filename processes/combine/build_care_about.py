@@ -1,10 +1,18 @@
 """combine / build_care_about -- the care-about set (the BGG-API fetch list).
 
-The lean master list (~1,000 games) the pipeline keeps: the great games in, the filler
-out. Two sides, deliberately different bars (see care-about-set.md for the full design):
+The lean master list (~600 games) the pipeline keeps: the great games in, the filler
+out. ONE quality bar on both sides plus one named exception (see care-about-set.md):
+
+    "a game needs a 6.95 geek rating, or a million plays on BGA"
+
+Deliberately a single bar rather than two separately-tuned numbers: it states in one
+sentence, and it doesn't need re-tuning as BGG's ratings drift. The BGA/BGG split it
+produces (~218/~382) is an OUTPUT of the rule, not a target -- chasing a particular mix
+would mean going back to two tuned bars, which is what this replaced. (Set 2026-08-06;
+was 5.95 geek / 100k plays on the BGA side, which gave ~975.)
 
   BGA side  -- games playable on BGA (the resolver gave them a BGG id):
-              keep if  is_expansion == 0  AND  (geek >= 5.95  OR  lifetime plays >= 100k)
+              keep if  is_expansion == 0  AND  (geek >= 6.95  OR  lifetime plays >= 1M)
   BGG side  -- good games NOT on BGA, pulled in as similarity-browse neighbours:
               keep if  is_expansion == 0  AND  rank > 0  AND  geek >= 6.95,
               minus anything already on BGA
@@ -55,9 +63,9 @@ BGA_DIR = ROOT / "data" / "bga"               # BGA game list (for games_played)
 BGG_DIR = ROOT / "data" / "bgg-csv"           # BGG bulk CSV zips
 DROPS_FILE = HERE / "bgg_drops.csv"           # hand-maintained BGG-id exclusions (committed)
 
-BGA_BAR = 5.95        # BGA-side geek bar (rounds to 6.0)
-BGG_BAR = 6.95        # BGG-side geek bar (rounds to 7.0)
-PLAYS_BAR = 100_000   # BGA-side lifetime-plays rescue
+BGA_BAR = 6.95          # BGA-side geek bar (rounds to 7.0) -- same bar as the BGG side
+BGG_BAR = 6.95          # BGG-side geek bar (rounds to 7.0)
+PLAYS_BAR = 1_000_000   # BGA-side lifetime-plays rescue: popularity, not quality
 
 
 def die(msg):
